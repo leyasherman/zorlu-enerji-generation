@@ -437,20 +437,48 @@ def export_excel(monthly: pd.DataFrame) -> None:
                 ws_val.cell(row=start_row + i, column=j + 1, value=text)
 
         # ── Tab 7: Metadata ───────────────────────────────────────────────
+        # Completeness stats computed from raw data
+        raw_for_meta  = pd.read_csv(RAW_CSV, parse_dates=["date"])
+        total_days    = raw_for_meta["date"].dt.date.nunique()
+        expected_rows_per_day = 24 * len(PP_IDS)
+        rows_by_day   = raw_for_meta.groupby(raw_for_meta["date"].dt.date).size()
+        complete_days = int((rows_by_day >= expected_rows_per_day * PARTIAL_DAY_THRESHOLD).sum())
+        partial_days_n = int((rows_by_day < expected_rows_per_day * PARTIAL_DAY_THRESHOLD).sum())
+        completeness_pct = round(complete_days / total_days * 100, 1) if total_days else 0
+
+        # failed_days.csv summary if present
+        if FAILED_CSV.exists():
+            fd = pd.read_csv(FAILED_CSV)
+            failed_summary = (fd["status"].value_counts()
+                              .reset_index()
+                              .apply(lambda r: f"{r['status']}: {r['count']}", axis=1)
+                              .str.cat(sep=", "))
+        else:
+            failed_summary = "None logged"
+
         pd.DataFrame([
-            ("Data Source",    "EPİAŞ Transparency Platform — seffaflik.epias.com.tr"),
-            ("API Endpoint",   "rt-gen-bulk (Plant-Level Real-Time Generation)"),
-            ("Coverage Start", "May 2019 (EPİAŞ began publishing plant-level data on 16 May 2019)"),
-            ("Coverage End",   (date.today() - timedelta(1)).strftime("%d %B %Y")),
-            ("Granularity",    "Monthly totals (MWh) — summed from hourly EPIAS data"),
-            ("Company",        "Zorlu Enerji Elektrik Uretim A.S. (ZOREN) and subsidiaries"),
-            ("Date Pulled",    pull_date),
-            ("Note 1",         "2019 is a partial year — data starts 16 May 2019"),
-            ("Note 2",         "Gokcedag Wind (135 MW) sold to Ronesans Enerji Dec 2025 — rows after 2025-12-31 are excluded from this dataset"),
-            ("Note 3",         "Pakistan (Jhimpir 56 MW) and Palestine (Dead Sea 1.5 MW) are NOT in EPIAS — not included"),
-            ("Note 4",         "Mercan hydro complex is split into 3 registered units in EPIAS: Mercan (20.4 MW known), Mercan (Yukari) and Mercan (Haci) — individual capacity for sub-units not available in public sources; sum all three for total Mercan output"),
-            ("Note 5",         "Lüleburgaz natural gas plant (49.5 MW) produced only 7.5 GWh total, almost entirely in 2019. Effectively inactive since — consistent with Zorlu's stated exit from fossil fuels"),
-            ("Note 6",         "Solar hybrid units at Alasehir (3.75 MW) and Kizildere (0.99 MW) are not registered as separate plants in EPIAS and are NOT in this dataset"),
+            ("Data Source",       "EPİAŞ Transparency Platform — seffaflik.epias.com.tr"),
+            ("API Endpoint",      "rt-gen-bulk (Plant-Level Real-Time Generation)"),
+            ("Coverage Start",    "May 2019 (EPİAŞ began publishing plant-level data on 16 May 2019)"),
+            ("Coverage End",      (date.today() - timedelta(1)).strftime("%d %B %Y")),
+            ("Granularity",       "Monthly totals (MWh) — summed from hourly EPIAS data"),
+            ("Company",           "Zorlu Enerji Elektrik Uretim A.S. (ZOREN) and subsidiaries"),
+            ("Date Pulled",       pull_date),
+            ("",                  ""),
+            ("— DATA COMPLETENESS —", ""),
+            ("Total days fetched",    str(total_days)),
+            ("Expected rows/day",     f"{expected_rows_per_day} (24h x {len(PP_IDS)} plants)"),
+            ("Complete days (>=80%)", f"{complete_days} / {total_days}  ({completeness_pct}%)"),
+            ("Partial days (<80%)",   f"{partial_days_n} — check failed_days.csv for details"),
+            ("Non-OK fetch results",  failed_summary),
+            ("",                  ""),
+            ("— NOTES —",         ""),
+            ("Note 1",  "2019 is a partial year — data starts 16 May 2019"),
+            ("Note 2",  "Gokcedag Wind (135 MW) sold to Ronesans Enerji Dec 2025 — rows after 2025-12-31 excluded"),
+            ("Note 3",  "Pakistan (Jhimpir 56 MW) and Palestine (Dead Sea 1.5 MW) are NOT in EPIAS — not included"),
+            ("Note 4",  "Mercan hydro complex: 3 EPIAS units (Mercan 20.4 MW known; Yukari + Haci capacity unknown)"),
+            ("Note 5",  "Lüleburgaz gas plant produced only 7.5 GWh total, almost entirely in 2019"),
+            ("Note 6",  "Solar hybrid units at Alasehir (3.75 MW) and Kizildere (0.99 MW) not in EPIAS"),
         ], columns=["Field", "Value"]).to_excel(writer, sheet_name="Metadata", index=False)
 
         # ── Tab 7: Plant Reference — static plant list with capacity ──────
