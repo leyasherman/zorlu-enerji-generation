@@ -93,7 +93,6 @@ NCOLS = 18
 # Compute all summary values from the actual data (never hardcode)
 raw_df        = pd.read_csv(RAW_CSV)
 total_rows    = len(raw_df)
-total_2024_gwh = monthly[monthly["year"] == 2024]["production_mwh"].sum() / 1000
 total_cap      = sum(p["capacity_mw"] for p in ZORLU_PLANTS if p["capacity_mw"])
 
 # Coverage dates from actual data range
@@ -102,31 +101,34 @@ cov_start     = dates.min().strftime("%b %Y")
 cov_end       = dates.max().strftime("%b %Y")
 coverage_str  = f"{cov_start} - {cov_end}"
 
-# Top plant and its 2024 GWh
-top_plant_2024 = (
-    monthly[monthly["year"] == 2024]
-    .groupby("plant_name")["production_mwh"].sum()
-    .idxmax()
+# Full years computed here so metrics use the most recent complete year
+full_years_tmp = sorted([
+    y for y in monthly["year"].unique()
+    if monthly[monthly["year"] == y]["month"].nunique() == 12
+])
+latest_yr = full_years_tmp[-1]
+
+latest_gwh = monthly[monthly["year"] == latest_yr]["production_mwh"].sum() / 1000
+top_plant  = (
+    monthly[monthly["year"] == latest_yr]
+    .groupby("plant_name")["production_mwh"].sum().idxmax()
 )
-top_plant_gwh  = (
-    monthly[(monthly["year"] == 2024) & (monthly["plant_name"] == top_plant_2024)]
+top_plant_gwh = (
+    monthly[(monthly["year"] == latest_yr) & (monthly["plant_name"] == top_plant)]
     ["production_mwh"].sum() / 1000
 )
-top_plant_cap  = next(
-    (p["capacity_mw"] for p in ZORLU_PLANTS if p["plant_name"] == top_plant_2024), 0
+top_plant_cap = next(
+    (p["capacity_mw"] for p in ZORLU_PLANTS if p["plant_name"] == top_plant), 0
 )
 top_cf = round(top_plant_gwh * 1000 / (top_plant_cap * 8760) * 100) if top_plant_cap else 0
-
-# Top fuel type in 2024
-top_fuel_2024 = (
-    monthly[monthly["year"] == 2024]
-    .groupby("fuel_type")["production_mwh"].sum()
-    .idxmax()
+top_fuel = (
+    monthly[monthly["year"] == latest_yr]
+    .groupby("fuel_type")["production_mwh"].sum().idxmax()
 )
 top_fuel_pct = round(
-    monthly[(monthly["year"] == 2024) & (monthly["fuel_type"] == top_fuel_2024)]
+    monthly[(monthly["year"] == latest_yr) & (monthly["fuel_type"] == top_fuel)]
     ["production_mwh"].sum() /
-    monthly[monthly["year"] == 2024]["production_mwh"].sum() * 100
+    monthly[monthly["year"] == latest_yr]["production_mwh"].sum() * 100
 )
 
 # ---------------------------------------------------------------------------
@@ -153,21 +155,29 @@ ws.row_dimensions[6].height = 38
 ws.row_dimensions[7].height = 16
 ws.row_dimensions[8].height = 10
 
+# Compute full years dynamically: years with data for all 12 months
+FULL_YEARS = sorted([
+    y for y in monthly["year"].unique()
+    if monthly[monthly["year"] == y]["month"].nunique() == 12
+])
+LATEST_FULL = FULL_YEARS[-1]    # most recent complete year
+AVG_LABEL   = f"Avg {FULL_YEARS[0]}-{str(LATEST_FULL)[-2:]}"  # e.g. "Avg 20-25"
+
 merge(ws, 4, 1, 4, NCOLS)
-cell(ws, 4, 1, "KEY METRICS -- 2024", bold=True, size=12, color=WHITE, bg=NAVY, align="center")
+cell(ws, 4, 1, f"KEY METRICS -- {LATEST_FULL}", bold=True, size=12, color=WHITE, bg=NAVY, align="center")
 
 metrics = [
-    ("Total Installed Capacity", f"{total_cap:.0f} MW",
+    ("Total Installed Capacity",       f"{total_cap:.0f} MW",
      "All Turkish plants combined"),
-    ("2024 Total Generation",    f"{total_2024_gwh:,.0f} GWh",
+    (f"{latest_yr} Total Generation",  f"{latest_gwh:,.0f} GWh",
      f"Across {monthly['plant_name'].nunique()} plants"),
-    ("Largest Plant (2024)",     top_plant_2024,
+    (f"Largest Plant ({latest_yr})",   top_plant,
      f"{top_plant_gwh:,.0f} GWh  |  {top_plant_cap:.0f} MW  |  CF {top_cf}%"),
-    ("Top Fuel (2024)",          top_fuel_2024,
+    (f"Top Fuel ({latest_yr})",        top_fuel,
      f"{top_fuel_pct}% of total output"),
-    ("Historical Range",         coverage_str,
+    ("Historical Range",               coverage_str,
      "Plant-level data from EPIAS"),
-    ("Hourly Data Points",       f"{total_rows:,}",
+    ("Hourly Data Points",             f"{total_rows:,}",
      "Aggregated to monthly MWh"),
 ]
 
@@ -192,8 +202,15 @@ cell(ws, R, 1, "ANNUAL PRODUCTION BY PLANT (GWh)   * partial year",
      bold=True, size=12, color=WHITE, bg=NAVY)
 R += 1
 
-for ci, h in enumerate(["Plant","Fuel Type","MW",
-                         "2019*","2020","2021","2022","2023","2024","2025*","2026*","TOTAL"], start=1):
+# Year columns: 2019 and 2026 are partial; all others are full years
+ALL_YRS     = [str(y) for y in range(2019, 2027)]
+PARTIAL_YRS = {"2019", "2026"}    # update here if data range changes
+hdr_labels  = (
+    ["Plant", "Fuel Type", "MW"] +
+    [f"{y}*" if y in PARTIAL_YRS else y for y in ALL_YRS] +
+    ["TOTAL"]
+)
+for ci, h in enumerate(hdr_labels, start=1):
     cell(ws, R, ci, h, bold=True, size=10, color=WHITE, bg=TEAL, align="center")
 ws.row_dimensions[R].height = 18;  R += 1
 
@@ -205,7 +222,7 @@ for idx, row in pivot.iterrows():
     cell(ws, R, 2, row["fuel_type"],  size=10, bg=bg_row)
     cap = row["capacity_mw"]
     cell(ws, R, 3, cap if cap else "", size=10, align="right", bg=bg_row, num_fmt=MW_FMT)
-    for ci, yr in enumerate(["2019","2020","2021","2022","2023","2024","2025","2026"], start=4):
+    for ci, yr in enumerate(ALL_YRS, start=4):
         val = row.get(yr, 0)
         cell(ws, R, ci, val if val > 0 else "", size=10, align="right", bg=bg_row, num_fmt=GWH_FMT)
     cell(ws, R, 12, row["Total"], bold=True, size=10, align="right", bg=bg_row, num_fmt=GWH_FMT)
@@ -217,15 +234,16 @@ ws.row_dimensions[R].height = 18
 cell(ws, R, 1, "TOTAL", bold=True, size=10, color=WHITE, bg=NAVY)
 cell(ws, R, 2, "", bg=NAVY)
 cell(ws, R, 3, f"{total_cap:.0f}", bold=True, size=10, color=WHITE, bg=NAVY, align="right")
-for ci, yr in enumerate(["2019","2020","2021","2022","2023","2024","2025","2026"], start=4):
+for ci, yr in enumerate(ALL_YRS, start=4):
     tot = pivot[yr].sum() if yr in pivot.columns else 0
     cell(ws, R, ci, round(tot, 1) if tot > 0 else "",
          bold=True, size=10, color=WHITE, bg=NAVY, align="right", num_fmt=GWH_FMT)
 cell(ws, R, 12, round(pivot["Total"].sum(), 1),
      bold=True, size=10, color=WHITE, bg=NAVY, align="right", num_fmt=GWH_FMT)
 
-# Color scale: full years 2020-2024 (cols 5-9)
-for col_idx in range(5, 10):
+# Color scale: full years only (skip partial 2019 and 2026)
+full_yr_cols = [4 + ALL_YRS.index(str(y)) for y in FULL_YEARS]
+for col_idx in full_yr_cols:
     rng = f"{get_column_letter(col_idx)}{DATA_START}:{get_column_letter(col_idx)}{DATA_END}"
     ws.conditional_formatting.add(rng, ColorScaleRule(
         start_type="num", start_value=0,    start_color="FFFFFF",
@@ -243,11 +261,14 @@ cell(ws, R, 1, "CAPACITY FACTOR (%)   =   actual output / theoretical maximum at
      bold=True, size=12, color=WHITE, bg=NAVY)
 R += 1
 
-for ci, h in enumerate(["Plant","Fuel Type","MW","2020","2021","2022","2023","2024","Avg 20-24"], start=1):
+cf_yr_strs  = [str(y) for y in FULL_YEARS]
+cf_headers  = ["Plant", "Fuel Type", "MW"] + cf_yr_strs + [AVG_LABEL]
+for ci, h in enumerate(cf_headers, start=1):
     cell(ws, R, ci, h, bold=True, size=10, color=WHITE, bg=TEAL, align="center")
 ws.row_dimensions[R].height = 18;  R += 1
 
-CF_START = R
+CF_START    = R
+avg_col     = 4 + len(FULL_YEARS)   # column index of the Avg column
 for idx, row in pivot.iterrows():
     bg_row = LGREY if idx % 2 == 0 else WHITE
     ws.row_dimensions[R].height = 16
@@ -256,19 +277,19 @@ for idx, row in pivot.iterrows():
     cell(ws, R, 2, row["fuel_type"],  size=10, bg=bg_row)
     cell(ws, R, 3, cap if cap else "", size=10, align="right", bg=bg_row, num_fmt=MW_FMT)
     cfs = []
-    for ci, yr in enumerate(["2020","2021","2022","2023","2024"], start=4):
+    for ci, yr in enumerate(cf_yr_strs, start=4):
         v = cf_pct(row, yr)
         cell(ws, R, ci, v if v is not None else "", size=10, align="right",
              bg=bg_row, num_fmt=PCT_FMT)
         if v is not None:
             cfs.append(v)
     avg = round(sum(cfs) / len(cfs)) if cfs else None
-    cell(ws, R, 9, avg if avg is not None else "", bold=True, size=10,
+    cell(ws, R, avg_col, avg if avg is not None else "", bold=True, size=10,
          align="right", bg=bg_row, num_fmt=PCT_FMT)
     R += 1
 CF_END = R - 1
 
-for col_idx in range(4, 10):
+for col_idx in range(4, avg_col + 1):
     rng = f"{get_column_letter(col_idx)}{CF_START}:{get_column_letter(col_idx)}{CF_END}"
     ws.conditional_formatting.add(rng, ColorScaleRule(
         start_type="num", start_value=0,  start_color="FFCCCC",
