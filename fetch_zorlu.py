@@ -352,27 +352,35 @@ def export_excel(monthly: pd.DataFrame) -> None:
         val_df = pd.DataFrame(val_rows)
         val_df.to_excel(writer, sheet_name="Validation", index=False)
 
-        # Annotation rows explaining expected gaps
-        annot = pd.DataFrame([
-            ("", ""),
-            ("Expected differences explained:", ""),
-            ("Wind gap (~90 GWh/yr)",
-             "Pakistan Jhimpir (56.4 MW) is in Annual Report but NOT in EPIAS (outside Turkey)"),
-            ("Geothermal gap (~200 GWh/yr)",
-             "rt-gen-bulk = gross (real-time meter); Annual Report = net (after station own-use). "
-             "Geothermal plants have high parasitic consumption (~10-15%)."),
-            ("Hydro gap (~50 GWh/yr)",
-             "Same gross vs net difference as above."),
-            ("Solar gap (~2 GWh/yr)",
-             "Small hybrid PV units at Alasehir and Kizildere are not registered in EPIAS."),
-            ("Natural Gas",
-             "Lüleburgaz almost inactive since 2019; small discrepancies may be rounding."),
-        ], columns=["Note", "Explanation"])
-
-        # Append annotation below the numbers
+        # Notes written below the data table (plain rows, no extra header)
+        notes = [
+            ["Expected differences — explained"],
+            ["Wind gap (~90-120 GWh/yr)",
+             "Pakistan Jhimpir (56.4 MW wind) is in the Annual Report but NOT in EPIAS. "
+             "Accounts for nearly all of the Wind shortfall."],
+            ["Geothermal 2022-2024 (+5 to +13%)",
+             "rt-gen-bulk is gross (real-time meter reading). Annual Report is net "
+             "(after ~10-15% station own-use). Expected direction: our data > report."],
+            ["Geothermal 2021 (-10%) — FLAG",
+             "Unexpected: our data is LOWER than the report for 2021. Likely cause: "
+             "Kizildere III may have used a different EPIAS plant ID in early 2021. "
+             "Treat 2021 geothermal figures with caution."],
+            ["Hydro +16-21%",
+             "Partly gross/net (expected ~5%). The excess (+15%) may indicate that "
+             "Yukari Mercan and Haci Mercan sub-units in EPIAS include output not "
+             "wholly owned by Zorlu, or a registration overlap. Investigate before "
+             "using hydro figures for valuation."],
+            ["Solar -100%",
+             "Hybrid PV units at Alasehir (3.75 MW) and Kizildere (0.99 MW) are "
+             "below EPIAS registration threshold and absent from this dataset."],
+            ["Natural Gas -100%",
+             "Lüleburgaz effectively inactive since 2019. Annual report rounds to 0."],
+        ]
         start_row = len(val_df) + 3
-        annot.to_excel(writer, sheet_name="Validation", index=False,
-                       startrow=start_row, header=False)
+        ws_val = writer.sheets["Validation"]
+        for i, note_row in enumerate(notes):
+            for j, text in enumerate(note_row):
+                ws_val.cell(row=start_row + i, column=j + 1, value=text)
 
         # ── Tab 7: Metadata ───────────────────────────────────────────────
         pd.DataFrame([
@@ -411,8 +419,8 @@ def export_excel(monthly: pd.DataFrame) -> None:
         MW_COLS   = {"Installed Capacity (MW)"}
 
         for sheet_name in ["Guide", "Summary", "By Plant", "Wide Pivot",
-                           "By Fuel Type", "Metadata", "Plant Reference",
-                           "Raw Hourly (sample)"]:
+                           "By Fuel Type", "Validation", "Metadata",
+                           "Plant Reference", "Raw Hourly (sample)"]:
             ws = book[sheet_name]
 
             # Auto-fit column widths
@@ -446,8 +454,46 @@ def export_excel(monthly: pd.DataFrame) -> None:
                         cell.number_format = MWH_FMT
 
         # Freeze top row on the main tabs
-        for sheet_name in ["Summary", "By Plant", "Wide Pivot", "By Fuel Type"]:
+        for sheet_name in ["Summary", "By Plant", "Wide Pivot", "By Fuel Type", "Validation"]:
             book[sheet_name].freeze_panes = "A2"
+
+        # Validation sheet: GWh columns + color-code the Difference column
+        ws_v = book["Validation"]
+        # Apply GWh format to cols C, D, E and % to col F
+        for row in ws_v.iter_rows(min_row=2, max_row=len(val_df) + 1):
+            for cell in row:
+                col = cell.column
+                if col in (3, 4, 5):   # Annual Report / This Dataset / Difference GWh
+                    cell.number_format = "#,##0.0"
+                elif col == 6:         # Difference %
+                    cell.number_format = '#,##0.0"%"'
+        # Color-code Difference (GWh) column: red for negative, green for positive
+        RED   = PatternFill("solid", fgColor="FFCCCC")
+        GREEN = PatternFill("solid", fgColor="C6EFCE")
+        AMBER = PatternFill("solid", fgColor="FFEB9C")
+        for row in ws_v.iter_rows(min_row=2, max_row=len(val_df) + 1, min_col=5, max_col=5):
+            for cell in row:
+                if cell.value is None:
+                    continue
+                try:
+                    v = float(cell.value)
+                    if v < -50:
+                        cell.fill = RED
+                    elif v > 50:
+                        cell.fill = AMBER   # unexpectedly high — warrants review
+                    elif abs(v) < 10:
+                        cell.fill = GREEN   # close match
+                except (TypeError, ValueError):
+                    pass
+        # Bold the section header for notes
+        note_hdr = ws_v.cell(row=len(val_df) + 3, column=1)
+        note_hdr.font = Font(bold=True, size=11)
+        ws_v.column_dimensions["A"].width = 12
+        ws_v.column_dimensions["B"].width = 16
+        ws_v.column_dimensions["C"].width = 22
+        ws_v.column_dimensions["D"].width = 20
+        ws_v.column_dimensions["E"].width = 20
+        ws_v.column_dimensions["F"].width = 16
 
         # Guide sheet: wrap text in description columns, wider columns
         ws_guide = book["Guide"]
