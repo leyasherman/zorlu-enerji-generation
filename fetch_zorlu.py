@@ -177,6 +177,28 @@ def export_excel(monthly: pd.DataFrame) -> None:
 
     with pd.ExcelWriter(EXCEL_OUT, engine="openpyxl") as writer:
 
+        # ── Tab 0: Guide — table of contents explaining each sheet ───────
+        guide_data = [
+            ("Sheet",                "What it contains",
+             "Best used for"),
+            ("Summary",             "One row per month — total production of ALL Zorlu plants combined (MWh)",
+             "Quick top-line view of the company. Spot overall trends and seasonality."),
+            ("By Plant",            "One row per plant per month — the main data table. Includes plant name, fuel type, installed capacity (MW), location and production (MWh)",
+             "Primary analysis sheet. Filter by plant or fuel type, calculate capacity factors, build any custom view."),
+            ("Wide Pivot",          "Same data as By Plant, but reshaped: rows = months, columns = individual plants",
+             "Plug directly into an Excel chart to compare plants visually side by side."),
+            ("By Fuel Type",        "Monthly production grouped by energy source: Geothermal / Hydroelectric / Wind / Natural Gas",
+             "Track how the generation mix has shifted over time (e.g. gas phased out after 2020)."),
+            ("Raw Hourly (sample)", "First 50,000 hourly readings straight from the EPIAS API, before any aggregation",
+             "Audit or verify the source data. Not needed for normal analysis."),
+            ("Metadata",            "Data source, API endpoint, date pulled, coverage dates and known caveats",
+             "Read before using the data. Lists what is NOT included and why."),
+            ("Plant Reference",     "Static list of all 15 plants with EPIAS ID, fuel type, installed capacity (MW) and location",
+             "Quick lookup of plant characteristics or to reproduce an API query for a specific plant."),
+        ]
+        guide_df = pd.DataFrame(guide_data[1:], columns=list(guide_data[0]))
+        guide_df.to_excel(writer, sheet_name="Guide", index=False)
+
         # ── Tab 1: Summary — one row per month, all plants combined ──────
         # Useful as a quick top-line view: total company output each month.
         summary = (
@@ -290,7 +312,7 @@ def export_excel(monthly: pd.DataFrame) -> None:
         MWH_COLS  = {"Production (MWh)", "Total Production (MWh)"}
         MW_COLS   = {"Installed Capacity (MW)"}
 
-        for sheet_name in ["Summary", "By Plant", "Wide Pivot",
+        for sheet_name in ["Guide", "Summary", "By Plant", "Wide Pivot",
                            "By Fuel Type", "Metadata", "Plant Reference",
                            "Raw Hourly (sample)"]:
             ws = book[sheet_name]
@@ -328,6 +350,25 @@ def export_excel(monthly: pd.DataFrame) -> None:
         # Freeze top row on the main tabs
         for sheet_name in ["Summary", "By Plant", "Wide Pivot", "By Fuel Type"]:
             book[sheet_name].freeze_panes = "A2"
+
+        # Guide sheet: wrap text in description columns, wider columns
+        ws_guide = book["Guide"]
+        for row in ws_guide.iter_rows(min_row=2):
+            for cell in row:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+        ws_guide.column_dimensions["A"].width = 22
+        ws_guide.column_dimensions["B"].width = 60
+        ws_guide.column_dimensions["C"].width = 55
+        ws_guide.row_dimensions[1].height = 18
+        for i in range(2, ws_guide.max_row + 1):
+            ws_guide.row_dimensions[i].height = 45
+
+        # Alternate row shading on Guide for readability
+        ALT_FILL = PatternFill("solid", fgColor="EEF2F7")
+        for row_idx, row in enumerate(ws_guide.iter_rows(min_row=2), start=2):
+            if row_idx % 2 == 0:
+                for cell in row:
+                    cell.fill = ALT_FILL
 
     print(f"  OK: Excel saved -> {EXCEL_OUT.name}")
 
