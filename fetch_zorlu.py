@@ -204,12 +204,11 @@ def export_excel(monthly: pd.DataFrame) -> None:
         summary = (
             monthly.groupby(["period", "year", "month"], as_index=False)["production_mwh"]
             .sum()
-            .rename(columns={"year": "Year", "month": "Month",
-                             "period": "Year-Month",
+            .rename(columns={"period": "Year-Month",
                              "production_mwh": "Total Production (MWh)"})
-            .sort_values(["Year", "Month"])
+            .sort_values(["year", "month"])
         )
-        summary[["Year-Month", "Year", "Month", "Total Production (MWh)"]].to_excel(
+        summary[["Year-Month", "Total Production (MWh)"]].to_excel(
             writer, sheet_name="Summary", index=False
         )
 
@@ -219,17 +218,15 @@ def export_excel(monthly: pd.DataFrame) -> None:
         long = (
             monthly.rename(columns={
                 "period":        "Year-Month",
-                "year":          "Year",
-                "month":         "Month",
                 "plant_name":    "Plant Name",
                 "fuel_type":     "Fuel Type",
                 "capacity_mw":   "Installed Capacity (MW)",
                 "location":      "Location",
                 "production_mwh": "Production (MWh)",
             })
-            .sort_values(["Year", "Month", "Plant Name"])
+            .sort_values(["year", "month", "Plant Name"])
         )
-        long[["Year-Month", "Year", "Month", "Plant Name", "Fuel Type",
+        long[["Year-Month", "Plant Name", "Fuel Type",
               "Installed Capacity (MW)", "Location", "Production (MWh)"]].to_excel(
             writer, sheet_name="By Plant", index=False
         )
@@ -244,9 +241,9 @@ def export_excel(monthly: pd.DataFrame) -> None:
             aggfunc="sum",
             fill_value=0,
         ).reset_index()
-        wide.columns.name = None   # remove "plant_name" label above column headers
-        wide = wide.rename(columns={"period": "Year-Month", "year": "Year", "month": "Month"})
-        wide = wide.sort_values(["Year", "Month"])
+        wide.columns.name = None
+        wide = wide.rename(columns={"period": "Year-Month"})
+        wide = wide.sort_values(["year", "month"]).drop(columns=["year", "month"])
         wide.to_excel(writer, sheet_name="Wide Pivot", index=False)
 
         # ── Tab 4: By Fuel Type — monthly totals grouped by energy source ─
@@ -254,11 +251,12 @@ def export_excel(monthly: pd.DataFrame) -> None:
         by_fuel = (
             monthly.groupby(["period", "year", "month", "fuel_type"], as_index=False)
             ["production_mwh"].sum()
-            .rename(columns={"period": "Year-Month", "year": "Year", "month": "Month",
-                             "fuel_type": "Fuel Type", "production_mwh": "Production (MWh)"})
-            .sort_values(["Year", "Month", "Fuel Type"])
+            .rename(columns={"period": "Year-Month",
+                             "fuel_type": "Fuel Type",
+                             "production_mwh": "Production (MWh)"})
+            .sort_values(["year", "month", "Fuel Type"])
         )
-        by_fuel[["Year-Month", "Year", "Month", "Fuel Type", "Production (MWh)"]].to_excel(
+        by_fuel[["Year-Month", "Fuel Type", "Production (MWh)"]].to_excel(
             writer, sheet_name="By Fuel Type", index=False
         )
 
