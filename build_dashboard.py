@@ -355,7 +355,177 @@ for sheet_name in wb.sheetnames:
                     cl.number_format = GWH_FMT
 
 # ---------------------------------------------------------------------------
+# Excel Tables with autofilter on key sheets
+# ---------------------------------------------------------------------------
+from openpyxl.worksheet.table import Table, TableStyleInfo
+
+def make_table(ws, name, ref, style="TableStyleMedium2"):
+    tab = Table(displayName=name, ref=ref)
+    tab.tableStyleInfo = TableStyleInfo(
+        name=style, showFirstColumn=False,
+        showLastColumn=False, showRowStripes=True, showColumnStripes=False
+    )
+    ws.add_table(tab)
+
+# By Plant table
+ws_bp = wb["By Plant"]
+bp_rows = ws_bp.max_row
+bp_cols = get_column_letter(ws_bp.max_column)
+make_table(ws_bp, "ByPlant", f"A1:{bp_cols}{bp_rows}")
+
+# By Fuel Type table
+ws_ft = wb["By Fuel Type"]
+ft_rows = ws_ft.max_row
+ft_cols = get_column_letter(ws_ft.max_column)
+make_table(ws_ft, "ByFuelType", f"A1:{ft_cols}{ft_rows}")
+
+# Summary table
+ws_sum = wb["Summary"]
+sum_rows = ws_sum.max_row
+make_table(ws_sum, "Summary", f"A1:B{sum_rows}", style="TableStyleMedium9")
+
+# ---------------------------------------------------------------------------
+# Charts sheet: 3 charts using openpyxl chart engine
+# ---------------------------------------------------------------------------
+from openpyxl.chart import LineChart, BarChart, Reference
+from openpyxl.chart.label import DataLabelList
+
+# Remove existing Charts sheet if rebuilding
+if "Charts" in wb.sheetnames:
+    del wb["Charts"]
+wc = wb.create_sheet("Charts", 2)   # position after Dashboard and Guide
+wc.sheet_view.showGridLines = False
+
+# -- Write helper data tables directly into the Charts sheet ----------------
+
+# Helper A: Monthly totals in GWh (from Summary sheet)
+ws_s = wb["Summary"]
+wc.cell(1, 1, "Year-Month");  wc.cell(1, 2, "Total (GWh)")
+wc.cell(1, 1).font = Font(bold=True)
+wc.cell(1, 2).font = Font(bold=True)
+n_months = ws_s.max_row - 1
+for r in range(2, ws_s.max_row + 1):
+    wc.cell(r, 1, ws_s.cell(r, 1).value)
+    mwh = ws_s.cell(r, 2).value
+    wc.cell(r, 2, round(mwh / 1000, 1) if mwh else 0)
+
+# Helper B: Annual by fuel type (GWh) — pivot built from monthly data
+fuels   = ["Geothermal", "Hydroelectric", "Wind", "Natural Gas"]
+full_yrs = sorted(monthly[monthly["year"].between(2020, 2024)]["year"].unique())
+ann_fuel = (
+    monthly[monthly["year"].isin(full_yrs)]
+    .groupby(["year", "fuel_type"])["production_mwh"].sum() / 1000
+).round(1).reset_index()
+
+BASE_C = 4   # start column for helper B
+wc.cell(1, BASE_C, "Year")
+for fi, f in enumerate(fuels):
+    wc.cell(1, BASE_C + 1 + fi, f)
+    wc.cell(1, BASE_C + 1 + fi).font = Font(bold=True)
+wc.cell(1, BASE_C).font = Font(bold=True)
+
+for ri, yr in enumerate(full_yrs, start=2):
+    wc.cell(ri, BASE_C, yr)
+    for fi, f in enumerate(fuels):
+        row = ann_fuel[(ann_fuel["year"] == yr) & (ann_fuel["fuel_type"] == f)]
+        wc.cell(ri, BASE_C + 1 + fi, float(row["production_mwh"].values[0]) if not row.empty else 0)
+
+n_fuel_rows = len(full_yrs)
+
+# Helper C: 2024 production by plant (GWh), sorted descending
+plant_2024 = (
+    monthly[monthly["year"] == 2024]
+    .groupby("plant_name")["production_mwh"].sum() / 1000
+).round(1).sort_values(ascending=False).reset_index()
+plant_2024.columns = ["Plant", "GWh_2024"]
+# Exclude near-zero plants
+plant_2024 = plant_2024[plant_2024["GWh_2024"] > 1].reset_index(drop=True)
+
+BASE_C2 = 10
+wc.cell(1, BASE_C2,     "Plant");   wc.cell(1, BASE_C2).font = Font(bold=True)
+wc.cell(1, BASE_C2 + 1, "2024 GWh"); wc.cell(1, BASE_C2 + 1).font = Font(bold=True)
+for ri, row in plant_2024.iterrows():
+    wc.cell(ri + 2, BASE_C2,     row["Plant"])
+    wc.cell(ri + 2, BASE_C2 + 1, row["GWh_2024"])
+n_plants = len(plant_2024)
+
+# -- Chart 1: Line chart — Monthly Total Generation (GWh) -------------------
+lc = LineChart()
+lc.title      = "Monthly Total Generation (GWh)"
+lc.style      = 10
+lc.y_axis.title = "GWh"
+lc.x_axis.title = "Month"
+lc.width  = 20
+lc.height = 12
+lc.legend = None
+
+data_ref = Reference(wc, min_col=2, min_row=1, max_row=n_months + 1)
+lc.add_data(data_ref, titles_from_data=True)
+lc.series[0].graphicalProperties.line.solidFill = "2E75B6"
+lc.series[0].graphicalProperties.line.width = 18000   # 1.8pt in EMUs
+
+cats = Reference(wc, min_col=1, min_row=2, max_row=n_months + 1)
+lc.set_categories(cats)
+wc.add_chart(lc, "A25")
+
+# -- Chart 2: Stacked bar — Annual by Fuel Type (GWh) -----------------------
+bc = BarChart()
+bc.type        = "col"
+bc.grouping    = "stacked"
+bc.overlap     = 100
+bc.title       = "Annual Generation by Fuel Type (GWh) — 2020-2024"
+bc.y_axis.title = "GWh"
+bc.style       = 10
+bc.width  = 16
+bc.height = 12
+
+FUEL_COLORS = {
+    "Geothermal":    "C55A11",   # orange-brown
+    "Hydroelectric": "2E75B6",   # blue
+    "Wind":          "70AD47",   # green
+    "Natural Gas":   "7F7F7F",   # grey
+}
+
+for fi, f in enumerate(fuels):
+    col_idx = BASE_C + 1 + fi
+    data_r = Reference(wc, min_col=col_idx, min_row=1, max_row=n_fuel_rows + 1)
+    bc.add_data(data_r, titles_from_data=True)
+    bc.series[fi].graphicalProperties.solidFill = FUEL_COLORS.get(f, "4472C4")
+
+cats2 = Reference(wc, min_col=BASE_C, min_row=2, max_row=n_fuel_rows + 1)
+bc.set_categories(cats2)
+bc.legend.position = "b"
+wc.add_chart(bc, "L25")
+
+# -- Chart 3: Horizontal bar — 2024 Production by Plant ---------------------
+hb = BarChart()
+hb.type        = "bar"    # horizontal
+hb.grouping    = "clustered"
+hb.title       = "2024 Production by Plant (GWh)"
+hb.x_axis.title = "GWh"
+hb.style       = 10
+hb.width  = 18
+hb.height = 14
+hb.legend = None
+
+data_r3 = Reference(wc, min_col=BASE_C2 + 1, min_row=1, max_row=n_plants + 2)
+hb.add_data(data_r3, titles_from_data=True)
+hb.series[0].graphicalProperties.solidFill = "2E75B6"
+
+cats3 = Reference(wc, min_col=BASE_C2, min_row=2, max_row=n_plants + 2)
+hb.set_categories(cats3)
+wc.add_chart(hb, "A55")
+
+# Section title on Charts sheet
+wc.merge_cells("A22:W22")
+t = wc.cell(22, 1, "Zorlu Enerji -- Charts")
+t.font      = Font(bold=True, size=14, color="FFFFFF")
+t.fill      = PatternFill("solid", fgColor="1F3864")
+t.alignment = Alignment(horizontal="center", vertical="center")
+wc.row_dimensions[22].height = 24
+
+# ---------------------------------------------------------------------------
 # Save
 # ---------------------------------------------------------------------------
 wb.save("zorlu_enerji_generation.xlsx")
-print("Dashboard built. Number formats applied to all sheets.")
+print("Dashboard built. Charts added. Tables with autofilter added.")
