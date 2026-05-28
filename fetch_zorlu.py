@@ -19,9 +19,12 @@ from eptr2 import EPTR2
 load_dotenv()
 
 # ── Output paths ──────────────────────────────────────────────────────────────
-OUT_DIR   = Path(__file__).parent
-RAW_CSV   = OUT_DIR / "zorlu_generation_raw.csv"
-EXCEL_OUT = OUT_DIR / "zorlu_enerji_generation.xlsx"
+OUT_DIR    = Path(__file__).parent
+RAW_CSV    = OUT_DIR / "zorlu_generation_raw.csv"
+EXCEL_OUT  = OUT_DIR / "zorlu_enerji_generation.xlsx"
+# Days where the API returned no data are tracked here so the user can review
+# them and re-run to retry. An empty day may be a genuine zero or a fetch failure.
+FAILED_CSV = OUT_DIR / "failed_days.csv"
 
 # ── Confirmed Zorlu Enerji physical plant IDs (from EPIAS pp-list) ────────────
 # Verified by cross-referencing with 2024 Annual Report plant list.
@@ -53,6 +56,22 @@ GOKCEDAG_SALE_DT = date(2025, 12, 31)   # last day to include for Zorlu
 
 # Plant-level data available from this date
 DATA_START = date(2019, 5, 16)
+
+# ── Annual report reference figures (GWh) ────────────────────────────────────
+# Source: Zorlu Enerji Integrated Annual Reports 2023 and 2024 (Appendix tables).
+# These are NET generation figures covering Turkey + Palestine + Pakistan.
+# Differences from our rt-gen-bulk data are expected — see Validation sheet.
+ANNUAL_REPORT_REF = {
+    # year: {fuel: GWh}
+    2021: {"Geothermal": 1963.0, "Wind": 457.3, "Hydroelectric": 273.0,
+           "Natural Gas": 12.0,  "Solar": 3.2},
+    2022: {"Geothermal": 1611.8, "Wind": 436.8, "Hydroelectric": 303.2,
+           "Natural Gas": 0.2,   "Solar": 3.2},
+    2023: {"Geothermal": 1552.0, "Wind": 444.4, "Hydroelectric": 329.0,
+           "Natural Gas": 0.5,   "Solar": 2.9},
+    2024: {"Geothermal": 1558.2, "Wind": 412.2, "Hydroelectric": 335.6,
+           "Natural Gas": 0.0,   "Solar": 2.0},
+}
 
 
 # ── EPIAS client ──────────────────────────────────────────────────────────────
@@ -120,11 +139,17 @@ def build_raw_data(eptr: EPTR2) -> pd.DataFrame:
         return pd.read_csv(RAW_CSV)
 
     new_rows: list[dict] = []
+    failed_days: list[date] = []
+
     with tqdm(total=len(remaining), desc="  Fetching", unit="day") as pbar:
         for i, day in enumerate(remaining):
             df_day = fetch_day(eptr, day)
             if not df_day.empty:
                 new_rows.extend(df_day.to_dict("records"))
+            else:
+                # Empty result: could be a real zero-generation day or a network
+                # failure after all retries. Log it so the user can investigate.
+                failed_days.append(day)
             pbar.update(1)
             time.sleep(0.35)
 
@@ -136,6 +161,17 @@ def build_raw_data(eptr: EPTR2) -> pd.DataFrame:
     df = pd.DataFrame(all_rows)
     df.to_csv(RAW_CSV, index=False)
     print(f"  OK: Raw data: {len(df)} rows saved -> {RAW_CSV.name}")
+
+    # Report failed / empty days
+    if failed_days:
+        failed_df = pd.DataFrame({"date": failed_days})
+        failed_df.to_csv(FAILED_CSV, index=False)
+        print(f"\n  WARNING: {len(failed_days)} days returned no data -> {FAILED_CSV.name}")
+        print(f"  Review failed_days.csv. If count > 5, consider re-running to retry.")
+        print(f"  Note: a small number of empty days is normal (e.g. early 2019).")
+    else:
+        print("  All days fetched successfully (no empty responses).")
+
     return df
 
 
@@ -199,6 +235,8 @@ def export_excel(monthly: pd.DataFrame) -> None:
              "Track how the generation mix has shifted over time (e.g. gas phased out after 2020)."),
             ("Raw Hourly (sample)", "First 50,000 hourly readings straight from the EPIAS API, before any aggregation",
              "Audit or verify the source data. Not needed for normal analysis."),
+            ("Validation",          "Annual totals from this dataset vs Zorlu annual report figures. Shows difference in GWh and % with explanations.",
+             "Verify data quality. Expected differences (gross/net, Pakistan excluded) are documented."),
             ("Metadata",            "Data source, API endpoint, date pulled, coverage dates and known caveats",
              "Read before using the data. Lists what is NOT included and why."),
             ("Plant Reference",     "Static list of all 15 plants with EPIAS ID, fuel type, installed capacity (MW) and location",
@@ -283,7 +321,60 @@ def export_excel(monthly: pd.DataFrame) -> None:
             writer, sheet_name="Raw Hourly (sample)", index=False
         )
 
-        # ── Tab 6: Metadata ───────────────────────────────────────────────
+        # ── Tab 6: Validation — cross-check vs Zorlu annual reports ─────
+        # Compares our rt-gen-bulk totals against the annual report figures.
+        # Differences are expected and explained; the goal is to make them
+        # visible and auditable rather than trusting the text alone.
+        our_annual = (
+            monthly.groupby(["year", "fuel_type"])["production_mwh"]
+            .sum().reset_index()
+        )
+        our_annual["our_gwh"] = (our_annual["production_mwh"] / 1000).round(1)
+
+        val_rows = []
+        for year in sorted(ANNUAL_REPORT_REF.keys()):
+            for fuel, ref_gwh in ANNUAL_REPORT_REF[year].items():
+                our_row = our_annual[
+                    (our_annual["year"] == year) & (our_annual["fuel_type"] == fuel)
+                ]
+                our_gwh = our_row["our_gwh"].values[0] if not our_row.empty else 0.0
+                diff     = round(our_gwh - ref_gwh, 1)
+                diff_pct = round(diff / ref_gwh * 100, 1) if ref_gwh else None
+                val_rows.append({
+                    "Year":               year,
+                    "Fuel Type":          fuel,
+                    "Annual Report (GWh)": ref_gwh,
+                    "This Dataset (GWh)": our_gwh,
+                    "Difference (GWh)":   diff,
+                    "Difference (%)":     diff_pct,
+                })
+
+        val_df = pd.DataFrame(val_rows)
+        val_df.to_excel(writer, sheet_name="Validation", index=False)
+
+        # Annotation rows explaining expected gaps
+        annot = pd.DataFrame([
+            ("", ""),
+            ("Expected differences explained:", ""),
+            ("Wind gap (~90 GWh/yr)",
+             "Pakistan Jhimpir (56.4 MW) is in Annual Report but NOT in EPIAS (outside Turkey)"),
+            ("Geothermal gap (~200 GWh/yr)",
+             "rt-gen-bulk = gross (real-time meter); Annual Report = net (after station own-use). "
+             "Geothermal plants have high parasitic consumption (~10-15%)."),
+            ("Hydro gap (~50 GWh/yr)",
+             "Same gross vs net difference as above."),
+            ("Solar gap (~2 GWh/yr)",
+             "Small hybrid PV units at Alasehir and Kizildere are not registered in EPIAS."),
+            ("Natural Gas",
+             "Lüleburgaz almost inactive since 2019; small discrepancies may be rounding."),
+        ], columns=["Note", "Explanation"])
+
+        # Append annotation below the numbers
+        start_row = len(val_df) + 3
+        annot.to_excel(writer, sheet_name="Validation", index=False,
+                       startrow=start_row, header=False)
+
+        # ── Tab 7: Metadata ───────────────────────────────────────────────
         pd.DataFrame([
             ("Data Source",    "EPİAŞ Transparency Platform — seffaflik.epias.com.tr"),
             ("API Endpoint",   "rt-gen-bulk (Plant-Level Real-Time Generation)"),

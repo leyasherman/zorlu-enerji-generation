@@ -90,8 +90,44 @@ ws.sheet_view.showGridLines = False
 
 NCOLS = 18
 
+# Compute all summary values from the actual data (never hardcode)
+raw_df        = pd.read_csv(RAW_CSV)
+total_rows    = len(raw_df)
 total_2024_gwh = monthly[monthly["year"] == 2024]["production_mwh"].sum() / 1000
 total_cap      = sum(p["capacity_mw"] for p in ZORLU_PLANTS if p["capacity_mw"])
+
+# Coverage dates from actual data range
+dates         = pd.to_datetime(raw_df["date"])
+cov_start     = dates.min().strftime("%b %Y")
+cov_end       = dates.max().strftime("%b %Y")
+coverage_str  = f"{cov_start} - {cov_end}"
+
+# Top plant and its 2024 GWh
+top_plant_2024 = (
+    monthly[monthly["year"] == 2024]
+    .groupby("plant_name")["production_mwh"].sum()
+    .idxmax()
+)
+top_plant_gwh  = (
+    monthly[(monthly["year"] == 2024) & (monthly["plant_name"] == top_plant_2024)]
+    ["production_mwh"].sum() / 1000
+)
+top_plant_cap  = next(
+    (p["capacity_mw"] for p in ZORLU_PLANTS if p["plant_name"] == top_plant_2024), 0
+)
+top_cf = round(top_plant_gwh * 1000 / (top_plant_cap * 8760) * 100) if top_plant_cap else 0
+
+# Top fuel type in 2024
+top_fuel_2024 = (
+    monthly[monthly["year"] == 2024]
+    .groupby("fuel_type")["production_mwh"].sum()
+    .idxmax()
+)
+top_fuel_pct = round(
+    monthly[(monthly["year"] == 2024) & (monthly["fuel_type"] == top_fuel_2024)]
+    ["production_mwh"].sum() /
+    monthly[monthly["year"] == 2024]["production_mwh"].sum() * 100
+)
 
 # ---------------------------------------------------------------------------
 # Section 1: Title
@@ -104,7 +140,7 @@ cell(ws, 1, 1, "ZORLU ENERJI -- Plant-Level Electricity Generation Dashboard",
 ws.row_dimensions[2].height = 18
 merge(ws, 2, 1, 2, NCOLS)
 cell(ws, 2, 1,
-     "Source: EPIAS Transparency Platform  |  Coverage: May 2019 - May 2026  |  Units: GWh unless noted",
+     f"Source: EPIAS Transparency Platform  |  Coverage: {coverage_str}  |  Units: GWh unless noted",
      size=10, color=WHITE, bg=TEAL, align="center", italic=True)
 
 # ---------------------------------------------------------------------------
@@ -121,12 +157,18 @@ merge(ws, 4, 1, 4, NCOLS)
 cell(ws, 4, 1, "KEY METRICS -- 2024", bold=True, size=12, color=WHITE, bg=NAVY, align="center")
 
 metrics = [
-    ("Total Installed Capacity", f"{total_cap:.0f} MW",           "All Turkish plants combined"),
-    ("2024 Total Generation",    f"{total_2024_gwh:,.0f} GWh",    "Across 15 plants"),
-    ("Largest Plant",            "Kizildere III",                  "1,068 GWh  |  165 MW  |  CF 74%"),
-    ("Top Fuel (2024)",          "Geothermal",                     "72% of total output"),
-    ("Historical Range",         "2019 - 2026",                    "Plant-level data from EPIAS"),
-    ("Hourly Data Points",       "910,907",                        "Aggregated to monthly MWh"),
+    ("Total Installed Capacity", f"{total_cap:.0f} MW",
+     "All Turkish plants combined"),
+    ("2024 Total Generation",    f"{total_2024_gwh:,.0f} GWh",
+     f"Across {monthly['plant_name'].nunique()} plants"),
+    ("Largest Plant (2024)",     top_plant_2024,
+     f"{top_plant_gwh:,.0f} GWh  |  {top_plant_cap:.0f} MW  |  CF {top_cf}%"),
+    ("Top Fuel (2024)",          top_fuel_2024,
+     f"{top_fuel_pct}% of total output"),
+    ("Historical Range",         coverage_str,
+     "Plant-level data from EPIAS"),
+    ("Hourly Data Points",       f"{total_rows:,}",
+     "Aggregated to monthly MWh"),
 ]
 
 for i, (label, value, note) in enumerate(metrics):
