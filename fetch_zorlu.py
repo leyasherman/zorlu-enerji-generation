@@ -34,8 +34,8 @@ ZORLU_PLANTS = [
     {"pp_id": 2283, "plant_name": "İkizdere",         "fuel_type": "Hydroelectric", "capacity_mw": 24.94,  "location": "Rize"},
     {"pp_id": 1353, "plant_name": "Tercan",           "fuel_type": "Hydroelectric", "capacity_mw": 15.00,  "location": "Erzincan"},
     {"pp_id": 1002, "plant_name": "Mercan",           "fuel_type": "Hydroelectric", "capacity_mw": 20.40,  "location": "Tunceli"},
-    {"pp_id": 2212, "plant_name": "Mercan (Yukarı)",  "fuel_type": "Hydroelectric", "capacity_mw": 0.0,    "location": "Tunceli"},
-    {"pp_id": 2678, "plant_name": "Mercan (Hacı)",    "fuel_type": "Hydroelectric", "capacity_mw": 0.0,    "location": "Tunceli"},
+    {"pp_id": 2212, "plant_name": "Mercan (Yukarı)",  "fuel_type": "Hydroelectric", "capacity_mw": None,   "location": "Tunceli"},
+    {"pp_id": 2678, "plant_name": "Mercan (Hacı)",    "fuel_type": "Hydroelectric", "capacity_mw": None,   "location": "Tunceli"},
     {"pp_id": 943,  "plant_name": "Beyköy",           "fuel_type": "Hydroelectric", "capacity_mw": 16.80,  "location": "Eskişehir"},
     {"pp_id": 1340, "plant_name": "Kuzgun",           "fuel_type": "Hydroelectric", "capacity_mw": 20.90,  "location": "Erzurum"},
     {"pp_id": 1287, "plant_name": "Çıldır",           "fuel_type": "Hydroelectric", "capacity_mw": 15.40,  "location": "Kars"},
@@ -44,8 +44,12 @@ ZORLU_PLANTS = [
     {"pp_id": 1222, "plant_name": "Lüleburgaz",       "fuel_type": "Natural Gas",   "capacity_mw": 49.53,  "location": "Kırklareli"},
 ]
 
-PP_IDS     = [p["pp_id"] for p in ZORLU_PLANTS]
-ID_TO_META = {p["pp_id"]: p for p in ZORLU_PLANTS}
+PP_IDS = [p["pp_id"] for p in ZORLU_PLANTS]
+
+# Gökçedağ (pp_id 1177) was sold to Rönesans Enerji in December 2025.
+# Production data after this date belongs to the new owner, not Zorlu.
+GOKCEDAG_PP_ID   = 1177
+GOKCEDAG_SALE_DT = date(2025, 12, 31)   # last day to include for Zorlu
 
 # Plant-level data available from this date
 DATA_START = date(2019, 5, 16)
@@ -138,12 +142,23 @@ def build_raw_data(eptr: EPTR2) -> pd.DataFrame:
 # ── Aggregation ───────────────────────────────────────────────────────────────
 
 def aggregate_to_monthly(df_raw: pd.DataFrame) -> pd.DataFrame:
-    """Sum hourly MWh to monthly MWh per physical plant."""
+    """Sum hourly MWh to monthly MWh per physical plant.
+
+    Gökçedağ rows after GOKCEDAG_SALE_DT are excluded: that plant was sold
+    in December 2025 and subsequent output belongs to the new owner.
+    """
     df = df_raw.copy()
     df["date"] = pd.to_datetime(df["date"])
     df["year"]  = df["date"].dt.year
     df["month"] = df["date"].dt.month
     df["pp_id"] = df["pp_id"].astype(int)
+
+    # Drop post-sale Gökçedağ rows
+    mask_gokcedag_postsale = (
+        (df["pp_id"] == GOKCEDAG_PP_ID) &
+        (df["date"].dt.date > GOKCEDAG_SALE_DT)
+    )
+    df = df[~mask_gokcedag_postsale]
 
     monthly = (
         df.groupby(["year", "month", "pp_id"], as_index=False)["production_mwh"]
@@ -161,19 +176,12 @@ def aggregate_to_monthly(df_raw: pd.DataFrame) -> pd.DataFrame:
 
 # ── Excel export ──────────────────────────────────────────────────────────────
 
-def _set_col_width(ws, col_letter: str, width: float):
-    """Helper: set column width in an openpyxl worksheet."""
-    from openpyxl.utils import get_column_letter
-    ws.column_dimensions[col_letter].width = width
-
-
 def export_excel(monthly: pd.DataFrame) -> None:
     print("\n[4/4] Building Excel ...")
     from openpyxl.styles import Font, PatternFill, Alignment
     from openpyxl.utils import get_column_letter
 
     pull_date = pd.Timestamp.now().strftime("%Y-%m-%d")
-    pull_ts   = pd.Timestamp.now().strftime("%Y-%m-%d %H:%M")
 
     with pd.ExcelWriter(EXCEL_OUT, engine="openpyxl") as writer:
 
@@ -285,10 +293,11 @@ def export_excel(monthly: pd.DataFrame) -> None:
             ("Company",        "Zorlu Enerji Elektrik Uretim A.S. (ZOREN) and subsidiaries"),
             ("Date Pulled",    pull_date),
             ("Note 1",         "2019 is a partial year — data starts 16 May 2019"),
-            ("Note 2",         "Gokcedag Wind (135 MW) was sold in December 2025 — data shown only while Zorlu-owned"),
+            ("Note 2",         "Gokcedag Wind (135 MW) sold to Ronesans Enerji Dec 2025 — rows after 2025-12-31 are excluded from this dataset"),
             ("Note 3",         "Pakistan (Jhimpir 56 MW) and Palestine (Dead Sea 1.5 MW) are NOT in EPIAS — not included"),
-            ("Note 4",         "Mercan hydro complex appears as 3 sub-units: Mercan, Mercan (Yukari), Mercan (Haci)"),
-            ("Note 5",         "Small solar hybrid units at Alasehir and Kizildere (< 4 MW total) are not tracked separately in EPIAS"),
+            ("Note 4",         "Mercan hydro complex is split into 3 registered units in EPIAS: Mercan (20.4 MW known), Mercan (Yukari) and Mercan (Haci) — individual capacity for sub-units not available in public sources; sum all three for total Mercan output"),
+            ("Note 5",         "Lüleburgaz natural gas plant (49.5 MW) produced only 7.5 GWh total, almost entirely in 2019. Effectively inactive since — consistent with Zorlu's stated exit from fossil fuels"),
+            ("Note 6",         "Solar hybrid units at Alasehir (3.75 MW) and Kizildere (0.99 MW) are not registered as separate plants in EPIAS and are NOT in this dataset"),
         ], columns=["Field", "Value"]).to_excel(writer, sheet_name="Metadata", index=False)
 
         # ── Tab 7: Plant Reference — static plant list with capacity ──────
