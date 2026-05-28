@@ -90,7 +90,44 @@ Regenerates the Dashboard sheet in the Excel file without re-fetching data.
 - **Pre-2019 data not available** in EPIAS — use Zorlu annual reports for earlier years (annual totals only, fuel-type aggregates).
 - **rt-gen-bulk vs UEVM:** This dataset uses real-time metered generation. Settlement figures (UEVM) used in financial contracts may differ slightly.
 - **Mercan (Yukarı) and Mercan (Hacı):** Installed capacity for these sub-units is not available in public sources. Sum all three Mercan entries for total Mercan output.
-- **2019 is a partial year** — data starts 16 May 2019. 2025–2026 figures are partial depending on when data was pulled.
+- **2019 is a partial year** — data starts 16 May 2019. 2026 is partial depending on when data was pulled.
+- **No native Excel charts** — the Dashboard contains formatted tables with conditional formatting; charts must be built manually in Excel from the data sheets.
+
+---
+
+## Changelog — issues found and fixed
+
+Documented for transparency and reproducibility.
+
+### Data accuracy
+| # | Issue | Fix |
+|---|---|---|
+| 1 | README described endpoint as UEVM (settlement) but code uses rt-gen-bulk (real-time) — different datasets | README and Metadata tab corrected; difference explained |
+| 2 | Gökçedağ (sold Dec 2025) had post-sale rows through May 2026 attributed to Zorlu | Rows after 2025-12-31 excluded in aggregation |
+| 3 | Mercan sub-units had `capacity_mw: 0.0` — misleading for capacity factor calc | Set to `None`; Metadata note added |
+| 4 | 2025 omitted from Capacity Factor table (hardcoded to 2020–2024) | Replaced with dynamic `FULL_YEARS` computed from data |
+
+### Code correctness
+| # | Issue | Fix |
+|---|---|---|
+| 5 | `fetch_day()` returned empty DataFrame for all failures — no distinction between API error, empty response, schema change, partial day | Returns `(df, status, detail)` tuple with 5 status codes |
+| 6 | Empty-response days not retried; `failed_days.csv` had no reason column | Empty responses are retried; CSV now has `status` + `detail` |
+| 7 | Partial days (< 80% of expected rows) were silently discarded | Partial days saved with `FETCH_PARTIAL` flag |
+| 8 | `build_dashboard.py` printed "Charts added" when no charts exist in the workbook | Print statement corrected |
+| 9 | Dead code: `_set_col_width`, `ID_TO_META`, `pull_ts`, unused imports | Removed |
+| 10 | Dashboard values hardcoded (coverage dates, data point count, top plant) | All derived from data at build time |
+
+### Documentation
+| # | Issue | Fix |
+|---|---|---|
+| 11 | README listed non-existent output files (`zorlu_organizations.csv`, `zorlu_uevcbs.csv`) | Removed |
+| 12 | Tab names in README didn't match workbook; `Guide` tab missing from list | Corrected |
+| 13 | Solar plants listed in plant table but absent from dataset | Removed from table; absence noted with explanation |
+| 14 | API call count stated as ~1,000; checkpoint as "every 200 rows" | Corrected to ~2,570 and "every 50 days" |
+
+### Data quality flags (open — require further investigation)
+- **Geothermal 2021 is 10% below the annual report** (expected direction: above). Likely a Kızıldere III plant ID issue for that year. Do not use 2021 geothermal in year-on-year comparisons without verification.
+- **Hydro is 16–21% above the annual report** every year. Gross/net explains ~5%; the remaining gap may indicate Yukarı Mercan / Hacı Mercan include output not wholly attributed to Zorlu in EPIAS. Verify before using hydro in a financial model.
 
 ---
 

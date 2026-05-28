@@ -7,13 +7,12 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 from openpyxl.formatting.rule import ColorScaleRule
+from openpyxl.worksheet.table import Table, TableStyleInfo
 from fetch_zorlu import aggregate_to_monthly, RAW_CSV, ZORLU_PLANTS
 
-# ---------------------------------------------------------------------------
-# Load and shape data
-# ---------------------------------------------------------------------------
 df_raw  = pd.read_csv(RAW_CSV)
 monthly = aggregate_to_monthly(df_raw)
+raw_df  = df_raw   # alias used for coverage dates
 
 annual = monthly.groupby(
     ["plant_name", "fuel_type", "capacity_mw", "year"]
@@ -25,34 +24,56 @@ pivot = annual.pivot_table(
     columns="year", values="gwh", fill_value=0
 ).reset_index()
 pivot.columns = [str(c) if isinstance(c, int) else c for c in pivot.columns]
-
-YEARS_ALL = [str(y) for y in range(2019, 2027)]
-pivot["Total"] = pivot[[y for y in YEARS_ALL if y in pivot.columns]].sum(axis=1).round(1)
+ALL_YRS = [str(y) for y in range(2019, 2027)]
+pivot["Total"] = pivot[[y for y in ALL_YRS if y in pivot.columns]].sum(axis=1).round(1)
 pivot = pivot.sort_values("2024", ascending=False).reset_index(drop=True)
 
-# Seasonality: average MWh per calendar month
 seas = (
     monthly.groupby(["plant_name", "month"])["production_mwh"]
     .mean().round(0).unstack(fill_value=0)
 )
 seas.columns = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+seas = seas.set_index(seas.reset_index()["plant_name"]).reindex(pivot["plant_name"])
 seas = seas.reset_index()
-order = pivot["plant_name"].tolist()
-seas = seas.set_index("plant_name").reindex(order).reset_index()
 
-# ---------------------------------------------------------------------------
-# Style constants
-# ---------------------------------------------------------------------------
+# Years with complete 12-month data
+FULL_YEARS  = sorted([y for y in monthly["year"].unique()
+                      if monthly[monthly["year"] == y]["month"].nunique() == 12])
+LATEST_FULL = FULL_YEARS[-1]
+AVG_LABEL   = f"Avg {FULL_YEARS[0]}-{str(LATEST_FULL)[-2:]}"
+PARTIAL_YRS = {"2019", "2026"}
+
+# Metrics derived from data (no hardcoding)
+total_cap    = sum(p["capacity_mw"] for p in ZORLU_PLANTS if p["capacity_mw"])
+total_rows   = len(raw_df)
+dates        = pd.to_datetime(raw_df["date"])
+coverage_str = f"{dates.min().strftime('%b %Y')} - {dates.max().strftime('%b %Y')}"
+
+latest_gwh   = monthly[monthly["year"] == LATEST_FULL]["production_mwh"].sum() / 1000
+top_plant    = (monthly[monthly["year"] == LATEST_FULL]
+                .groupby("plant_name")["production_mwh"].sum().idxmax())
+top_plant_gwh = (monthly[(monthly["year"] == LATEST_FULL) &
+                          (monthly["plant_name"] == top_plant)]["production_mwh"].sum() / 1000)
+top_plant_cap = next((p["capacity_mw"] for p in ZORLU_PLANTS if p["plant_name"] == top_plant), 0)
+top_cf        = round(top_plant_gwh * 1000 / (top_plant_cap * 8760) * 100) if top_plant_cap else 0
+top_fuel      = (monthly[monthly["year"] == LATEST_FULL]
+                 .groupby("fuel_type")["production_mwh"].sum().idxmax())
+top_fuel_pct  = round(
+    monthly[(monthly["year"] == LATEST_FULL) & (monthly["fuel_type"] == top_fuel)]
+    ["production_mwh"].sum() /
+    monthly[monthly["year"] == LATEST_FULL]["production_mwh"].sum() * 100
+)
+
 NAVY   = "1F3864"
 TEAL   = "2E75B6"
 LGREY  = "F2F2F2"
 WHITE  = "FFFFFF"
 DGREEN = "375623"
-
-MWH_FMT = "#,##0"      # e.g. 128,176
-GWH_FMT = "#,##0.0"    # e.g.   1,068.2
-MW_FMT  = "#,##0.0"    # e.g.      45.0
-PCT_FMT = '0"%"'        # e.g.      74%
+MWH_FMT = "#,##0"
+GWH_FMT = "#,##0.0"
+MW_FMT  = "#,##0.0"
+PCT_FMT = '0"%"'
+NCOLS   = 18
 
 
 def cell(ws, r, col, value="", bold=False, size=11, color="000000",
@@ -79,61 +100,13 @@ def merge(ws, r1, c1, r2, c2):
     ws.merge_cells(start_row=r1, start_column=c1, end_row=r2, end_column=c2)
 
 
-# ---------------------------------------------------------------------------
-# Open workbook
-# ---------------------------------------------------------------------------
 wb = openpyxl.load_workbook("zorlu_enerji_generation.xlsx")
 if "Dashboard" in wb.sheetnames:
     del wb["Dashboard"]
 ws = wb.create_sheet("Dashboard", 0)
 ws.sheet_view.showGridLines = False
 
-NCOLS = 18
-
-# Compute all summary values from the actual data (never hardcode)
-raw_df        = pd.read_csv(RAW_CSV)
-total_rows    = len(raw_df)
-total_cap      = sum(p["capacity_mw"] for p in ZORLU_PLANTS if p["capacity_mw"])
-
-# Coverage dates from actual data range
-dates         = pd.to_datetime(raw_df["date"])
-cov_start     = dates.min().strftime("%b %Y")
-cov_end       = dates.max().strftime("%b %Y")
-coverage_str  = f"{cov_start} - {cov_end}"
-
-# Full years computed here so metrics use the most recent complete year
-full_years_tmp = sorted([
-    y for y in monthly["year"].unique()
-    if monthly[monthly["year"] == y]["month"].nunique() == 12
-])
-latest_yr = full_years_tmp[-1]
-
-latest_gwh = monthly[monthly["year"] == latest_yr]["production_mwh"].sum() / 1000
-top_plant  = (
-    monthly[monthly["year"] == latest_yr]
-    .groupby("plant_name")["production_mwh"].sum().idxmax()
-)
-top_plant_gwh = (
-    monthly[(monthly["year"] == latest_yr) & (monthly["plant_name"] == top_plant)]
-    ["production_mwh"].sum() / 1000
-)
-top_plant_cap = next(
-    (p["capacity_mw"] for p in ZORLU_PLANTS if p["plant_name"] == top_plant), 0
-)
-top_cf = round(top_plant_gwh * 1000 / (top_plant_cap * 8760) * 100) if top_plant_cap else 0
-top_fuel = (
-    monthly[monthly["year"] == latest_yr]
-    .groupby("fuel_type")["production_mwh"].sum().idxmax()
-)
-top_fuel_pct = round(
-    monthly[(monthly["year"] == latest_yr) & (monthly["fuel_type"] == top_fuel)]
-    ["production_mwh"].sum() /
-    monthly[monthly["year"] == latest_yr]["production_mwh"].sum() * 100
-)
-
-# ---------------------------------------------------------------------------
-# Section 1: Title
-# ---------------------------------------------------------------------------
+# ── Title ─────────────────────────────────────────────────────────────────────
 ws.row_dimensions[1].height = 34
 merge(ws, 1, 1, 1, NCOLS)
 cell(ws, 1, 1, "ZORLU ENERJI -- Plant-Level Electricity Generation Dashboard",
@@ -145,56 +118,33 @@ cell(ws, 2, 1,
      f"Source: EPIAS Transparency Platform  |  Coverage: {coverage_str}  |  Units: GWh unless noted",
      size=10, color=WHITE, bg=TEAL, align="center", italic=True)
 
-# ---------------------------------------------------------------------------
-# Section 2: Key metrics
-# ---------------------------------------------------------------------------
-ws.row_dimensions[3].height = 10
-ws.row_dimensions[4].height = 20
-ws.row_dimensions[5].height = 16
-ws.row_dimensions[6].height = 38
-ws.row_dimensions[7].height = 16
-ws.row_dimensions[8].height = 10
-
-# Compute full years dynamically: years with data for all 12 months
-FULL_YEARS = sorted([
-    y for y in monthly["year"].unique()
-    if monthly[monthly["year"] == y]["month"].nunique() == 12
-])
-LATEST_FULL = FULL_YEARS[-1]    # most recent complete year
-AVG_LABEL   = f"Avg {FULL_YEARS[0]}-{str(LATEST_FULL)[-2:]}"  # e.g. "Avg 20-25"
+# ── Key metrics ───────────────────────────────────────────────────────────────
+for r, h in [(3, 10), (4, 20), (5, 16), (6, 38), (7, 16), (8, 10)]:
+    ws.row_dimensions[r].height = h
 
 merge(ws, 4, 1, 4, NCOLS)
-cell(ws, 4, 1, f"KEY METRICS -- {LATEST_FULL}", bold=True, size=12, color=WHITE, bg=NAVY, align="center")
+cell(ws, 4, 1, f"KEY METRICS -- {LATEST_FULL}",
+     bold=True, size=12, color=WHITE, bg=NAVY, align="center")
 
 metrics = [
-    ("Total Installed Capacity",       f"{total_cap:.0f} MW",
-     "All Turkish plants combined"),
-    (f"{latest_yr} Total Generation",  f"{latest_gwh:,.0f} GWh",
-     f"Across {monthly['plant_name'].nunique()} plants"),
-    (f"Largest Plant ({latest_yr})",   top_plant,
-     f"{top_plant_gwh:,.0f} GWh  |  {top_plant_cap:.0f} MW  |  CF {top_cf}%"),
-    (f"Top Fuel ({latest_yr})",        top_fuel,
-     f"{top_fuel_pct}% of total output"),
-    ("Historical Range",               coverage_str,
-     "Plant-level data from EPIAS"),
-    ("Hourly Data Points",             f"{total_rows:,}",
-     "Aggregated to monthly MWh"),
+    ("Total Installed Capacity",      f"{total_cap:.0f} MW",         "All Turkish plants combined"),
+    (f"{LATEST_FULL} Total Generation", f"{latest_gwh:,.0f} GWh",   f"Across {monthly['plant_name'].nunique()} plants"),
+    (f"Largest Plant ({LATEST_FULL})", top_plant,                    f"{top_plant_gwh:,.0f} GWh  |  {top_plant_cap:.0f} MW  |  CF {top_cf}%"),
+    (f"Top Fuel ({LATEST_FULL})",     top_fuel,                      f"{top_fuel_pct}% of total output"),
+    ("Historical Range",              coverage_str,                  "Plant-level data from EPIAS"),
+    ("Hourly Data Points",            f"{total_rows:,}",             "Aggregated to monthly MWh"),
 ]
-
 for i, (label, value, note) in enumerate(metrics):
     col = 1 + i * 3
     merge(ws, 5, col, 5, col + 2)
     merge(ws, 6, col, 6, col + 2)
     merge(ws, 7, col, 7, col + 2)
     cell(ws, 5, col, label, bold=True, size=9,  color="AAAAAA", align="center")
-    cell(ws, 6, col, value, bold=True, size=17, color=NAVY, bg=LGREY, align="center")
+    cell(ws, 6, col, value, bold=True, size=17, color=NAVY,     bg=LGREY, align="center")
     cell(ws, 7, col, note,  italic=True, size=8, color="777777", align="center")
 
-# ---------------------------------------------------------------------------
-# Section 3: Annual production heatmap
-# ---------------------------------------------------------------------------
+# ── Annual production heatmap ─────────────────────────────────────────────────
 R = 9
-
 ws.row_dimensions[R].height = 10;  R += 1
 ws.row_dimensions[R].height = 22
 merge(ws, R, 1, R, NCOLS)
@@ -202,14 +152,8 @@ cell(ws, R, 1, "ANNUAL PRODUCTION BY PLANT (GWh)   * partial year",
      bold=True, size=12, color=WHITE, bg=NAVY)
 R += 1
 
-# Year columns: 2019 and 2026 are partial; all others are full years
-ALL_YRS     = [str(y) for y in range(2019, 2027)]
-PARTIAL_YRS = {"2019", "2026"}    # update here if data range changes
-hdr_labels  = (
-    ["Plant", "Fuel Type", "MW"] +
-    [f"{y}*" if y in PARTIAL_YRS else y for y in ALL_YRS] +
-    ["TOTAL"]
-)
+hdr_labels = (["Plant", "Fuel Type", "MW"] +
+              [f"{y}*" if y in PARTIAL_YRS else y for y in ALL_YRS] + ["TOTAL"])
 for ci, h in enumerate(hdr_labels, start=1):
     cell(ws, R, ci, h, bold=True, size=10, color=WHITE, bg=TEAL, align="center")
 ws.row_dimensions[R].height = 18;  R += 1
@@ -229,7 +173,6 @@ for idx, row in pivot.iterrows():
     R += 1
 DATA_END = R - 1
 
-# Total row
 ws.row_dimensions[R].height = 18
 cell(ws, R, 1, "TOTAL", bold=True, size=10, color=WHITE, bg=NAVY)
 cell(ws, R, 2, "", bg=NAVY)
@@ -241,34 +184,29 @@ for ci, yr in enumerate(ALL_YRS, start=4):
 cell(ws, R, 12, round(pivot["Total"].sum(), 1),
      bold=True, size=10, color=WHITE, bg=NAVY, align="right", num_fmt=GWH_FMT)
 
-# Color scale: full years only (skip partial 2019 and 2026)
 full_yr_cols = [4 + ALL_YRS.index(str(y)) for y in FULL_YEARS]
 for col_idx in full_yr_cols:
     rng = f"{get_column_letter(col_idx)}{DATA_START}:{get_column_letter(col_idx)}{DATA_END}"
     ws.conditional_formatting.add(rng, ColorScaleRule(
-        start_type="num", start_value=0,    start_color="FFFFFF",
+        start_type="num", start_value=0,     start_color="FFFFFF",
         mid_type="percentile", mid_value=50, mid_color="C6EFCE",
         end_type="max",                      end_color=DGREEN))
-
 R += 2
 
-# ---------------------------------------------------------------------------
-# Section 4: Capacity factors
-# ---------------------------------------------------------------------------
+# ── Capacity factors ──────────────────────────────────────────────────────────
 ws.row_dimensions[R].height = 22
 merge(ws, R, 1, R, NCOLS)
 cell(ws, R, 1, "CAPACITY FACTOR (%)   =   actual output / theoretical maximum at rated capacity",
      bold=True, size=12, color=WHITE, bg=NAVY)
 R += 1
 
-cf_yr_strs  = [str(y) for y in FULL_YEARS]
-cf_headers  = ["Plant", "Fuel Type", "MW"] + cf_yr_strs + [AVG_LABEL]
-for ci, h in enumerate(cf_headers, start=1):
+cf_yr_strs = [str(y) for y in FULL_YEARS]
+avg_col    = 4 + len(FULL_YEARS)
+for ci, h in enumerate(["Plant", "Fuel Type", "MW"] + cf_yr_strs + [AVG_LABEL], start=1):
     cell(ws, R, ci, h, bold=True, size=10, color=WHITE, bg=TEAL, align="center")
 ws.row_dimensions[R].height = 18;  R += 1
 
-CF_START    = R
-avg_col     = 4 + len(FULL_YEARS)   # column index of the Avg column
+CF_START = R
 for idx, row in pivot.iterrows():
     bg_row = LGREY if idx % 2 == 0 else WHITE
     ws.row_dimensions[R].height = 16
@@ -295,12 +233,9 @@ for col_idx in range(4, avg_col + 1):
         start_type="num", start_value=0,  start_color="FFCCCC",
         mid_type="num",   mid_value=40,   mid_color="FFEB9C",
         end_type="num",   end_value=85,   end_color=DGREEN))
-
 R += 2
 
-# ---------------------------------------------------------------------------
-# Section 5: Monthly seasonality
-# ---------------------------------------------------------------------------
+# ── Monthly seasonality ───────────────────────────────────────────────────────
 ws.row_dimensions[R].height = 22
 merge(ws, R, 1, R, NCOLS)
 cell(ws, R, 1,
@@ -318,8 +253,8 @@ for idx, srow in seas.iterrows():
     bg_row = LGREY if idx % 2 == 0 else WHITE
     ws.row_dimensions[R].height = 16
     pname = srow["plant_name"]
-    fuel_vals = pivot.loc[pivot["plant_name"] == pname, "fuel_type"].values
-    fuel = fuel_vals[0] if len(fuel_vals) else ""
+    fuel  = pivot.loc[pivot["plant_name"] == pname, "fuel_type"].values
+    fuel  = fuel[0] if len(fuel) else ""
     cell(ws, R, 1, pname, bold=True, size=10, bg=bg_row)
     cell(ws, R, 2, fuel,  size=10, bg=bg_row)
     total_monthly = 0
@@ -339,18 +274,13 @@ for col_idx in range(3, 15):
         start_type="min", start_color="FFFFFF",
         end_type="max",   end_color="2E75B6"))
 
-# ---------------------------------------------------------------------------
-# Column widths
-# ---------------------------------------------------------------------------
 ws.column_dimensions["A"].width = 22
 ws.column_dimensions["B"].width = 16
 ws.column_dimensions["C"].width = 7
 for i in range(4, 19):
     ws.column_dimensions[get_column_letter(i)].width = 9
 
-# ---------------------------------------------------------------------------
-# Fix number formats on all other sheets too
-# ---------------------------------------------------------------------------
+# ── Number formats on all other sheets ───────────────────────────────────────
 MWH_COLS = {"Production (MWh)", "Total Production (MWh)"}
 MW_COLS  = {"Installed Capacity (MW)"}
 
@@ -368,53 +298,32 @@ for sheet_name in wb.sheetnames:
             for row in ws2.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
                 for cl in row:
                     cl.number_format = MW_FMT
-    # Wide Pivot: all numeric columns after col 1 are GWh
     if sheet_name == "Wide Pivot":
         for col_cells in ws2.iter_cols(min_col=2, min_row=2):
             for cl in col_cells:
                 if isinstance(cl.value, (int, float)):
                     cl.number_format = GWH_FMT
 
-# ---------------------------------------------------------------------------
-# Excel Tables with autofilter on key sheets
-# ---------------------------------------------------------------------------
-from openpyxl.worksheet.table import Table, TableStyleInfo
-
+# ── Autofilter tables on key sheets ──────────────────────────────────────────
 def make_table(ws, name, ref, style="TableStyleMedium2"):
-    # Remove existing table with the same name if present
     if name in ws.tables:
         del ws.tables[name]
     tab = Table(displayName=name, ref=ref)
     tab.tableStyleInfo = TableStyleInfo(
-        name=style, showFirstColumn=False,
-        showLastColumn=False, showRowStripes=True, showColumnStripes=False
+        name=style, showFirstColumn=False, showLastColumn=False,
+        showRowStripes=True, showColumnStripes=False
     )
     ws.add_table(tab)
 
-# By Plant table
-ws_bp = wb["By Plant"]
-bp_rows = ws_bp.max_row
-bp_cols = get_column_letter(ws_bp.max_column)
-make_table(ws_bp, "ByPlant", f"A1:{bp_cols}{bp_rows}")
-
-# By Fuel Type table
-ws_ft = wb["By Fuel Type"]
-ft_rows = ws_ft.max_row
-ft_cols = get_column_letter(ws_ft.max_column)
-make_table(ws_ft, "ByFuelType", f"A1:{ft_cols}{ft_rows}")
-
-# Summary table
+ws_bp  = wb["By Plant"]
+ws_ft  = wb["By Fuel Type"]
 ws_sum = wb["Summary"]
-sum_rows = ws_sum.max_row
-make_table(ws_sum, "Summary", f"A1:B{sum_rows}", style="TableStyleMedium9")
+make_table(ws_bp,  "ByPlant",    f"A1:{get_column_letter(ws_bp.max_column)}{ws_bp.max_row}")
+make_table(ws_ft,  "ByFuelType", f"A1:{get_column_letter(ws_ft.max_column)}{ws_ft.max_row}")
+make_table(ws_sum, "Summary",    f"A1:B{ws_sum.max_row}", style="TableStyleMedium9")
 
-# Remove Charts sheet if it exists from a previous build
 if "Charts" in wb.sheetnames:
     del wb["Charts"]
 
-
-# ---------------------------------------------------------------------------
-# Save
-# ---------------------------------------------------------------------------
 wb.save("zorlu_enerji_generation.xlsx")
-print("Dashboard built. Charts added. Tables with autofilter added.")
+print("Dashboard built. Autofilter tables added to By Plant, By Fuel Type, Summary.")
