@@ -86,34 +86,67 @@ def get_client() -> EPTR2:
 
 # ── Data fetching ─────────────────────────────────────────────────────────────
 
-def fetch_day(eptr: EPTR2, day: date, retries: int = 3) -> pd.DataFrame:
+EXPECTED_ROWS_PER_DAY = 24 * len(PP_IDS)   # 24 hours × 15 plants = 360
+PARTIAL_DAY_THRESHOLD = 0.80               # flag if <80% of expected rows returned
+
+# Possible fetch outcomes — stored in failed_days.csv for review
+FETCH_OK       = "ok"
+FETCH_EMPTY    = "empty_response"     # API returned 0 rows; genuine zero or transient
+FETCH_SCHEMA   = "schema_mismatch"    # powerPlantName column absent; API changed
+FETCH_PARTIAL  = "partial_day"        # fewer rows than expected; missing hours/plants
+FETCH_ERROR    = "api_error"          # exception after all retries
+
+
+def fetch_day(eptr: EPTR2, day: date, retries: int = 3) -> tuple[pd.DataFrame, str]:
     """
     Fetch hourly generation for all Zorlu plants for one calendar day.
-    Returns a DataFrame with columns: date, hour, pp_id, plant_name, total_mwh.
-    Returns empty DataFrame on failure.
+
+    Returns (DataFrame, status) where status is one of the FETCH_* constants.
+    - FETCH_OK       — full response, expected row count
+    - FETCH_PARTIAL  — fewer rows than expected (missing hours or plants)
+    - FETCH_EMPTY    — API returned nothing (may be transient; will be retried)
+    - FETCH_SCHEMA   — response structure unexpected (API may have changed)
+    - FETCH_ERROR    — exception on every attempt
     """
     date_str = f"{day.isoformat()}T00:00:00+03:00"
+    last_exc: str = ""
+
     for attempt in range(retries):
         try:
             df = eptr.call("rt-gen-bulk", date=date_str, pp_ids=PP_IDS)
+
+            # Case 1: API returned nothing at all — retry, may be transient
             if df is None or df.empty:
-                return pd.DataFrame()
+                if attempt < retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                return pd.DataFrame(), FETCH_EMPTY, "API returned 0 rows after all retries"
 
-            # Extract plant id from the powerPlantName column (format: "NAME-EIC-ID")
-            if "powerPlantName" in df.columns:
-                df["pp_id"] = df["powerPlantName"].str.extract(r"-(\d+)$").astype(int)
-            else:
-                return pd.DataFrame()
+            # Case 2: response has unexpected schema
+            if "powerPlantName" not in df.columns:
+                return pd.DataFrame(), FETCH_SCHEMA, f"columns={list(df.columns)}"
 
+            # Extract physical plant ID from "NAME-EIC-ID" suffix
+            df["pp_id"] = df["powerPlantName"].str.extract(r"-(\d+)$").astype(int)
             keep = df[df["pp_id"].isin(PP_IDS)][["date", "hour", "pp_id", "total"]].copy()
             keep.rename(columns={"total": "production_mwh"}, inplace=True)
-            keep["production_mwh"] = pd.to_numeric(keep["production_mwh"], errors="coerce").fillna(0)
-            return keep
+            keep["production_mwh"] = pd.to_numeric(
+                keep["production_mwh"], errors="coerce"
+            ).fillna(0)
 
-        except Exception:
+            # Case 3: partial day — fewer rows than expected
+            if len(keep) < EXPECTED_ROWS_PER_DAY * PARTIAL_DAY_THRESHOLD:
+                detail = f"got {len(keep)} rows, expected ~{EXPECTED_ROWS_PER_DAY}"
+                return keep, FETCH_PARTIAL, detail
+
+            return keep, FETCH_OK, ""
+
+        except Exception as e:
+            exc_msg = str(e)[:120]
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
-    return pd.DataFrame()
+
+    return pd.DataFrame(), FETCH_ERROR, exc_msg
 
 
 def build_raw_data(eptr: EPTR2) -> pd.DataFrame:
@@ -139,17 +172,18 @@ def build_raw_data(eptr: EPTR2) -> pd.DataFrame:
         return pd.read_csv(RAW_CSV)
 
     new_rows: list[dict] = []
-    failed_days: list[date] = []
+    problem_days: list[dict] = []   # rows: {date, status, detail}
 
     with tqdm(total=len(remaining), desc="  Fetching", unit="day") as pbar:
         for i, day in enumerate(remaining):
-            df_day = fetch_day(eptr, day)
-            if not df_day.empty:
+            df_day, status, detail = fetch_day(eptr, day)
+
+            if status in (FETCH_OK, FETCH_PARTIAL):
                 new_rows.extend(df_day.to_dict("records"))
-            else:
-                # Empty result: could be a real zero-generation day or a network
-                # failure after all retries. Log it so the user can investigate.
-                failed_days.append(day)
+
+            if status != FETCH_OK:
+                problem_days.append({"date": day, "status": status, "detail": detail})
+
             pbar.update(1)
             time.sleep(0.35)
 
@@ -162,15 +196,20 @@ def build_raw_data(eptr: EPTR2) -> pd.DataFrame:
     df.to_csv(RAW_CSV, index=False)
     print(f"  OK: Raw data: {len(df)} rows saved -> {RAW_CSV.name}")
 
-    # Report failed / empty days
-    if failed_days:
-        failed_df = pd.DataFrame({"date": failed_days})
+    # Report and log any non-OK days
+    if problem_days:
+        failed_df = pd.DataFrame(problem_days)
         failed_df.to_csv(FAILED_CSV, index=False)
-        print(f"\n  WARNING: {len(failed_days)} days returned no data -> {FAILED_CSV.name}")
-        print(f"  Review failed_days.csv. If count > 5, consider re-running to retry.")
-        print(f"  Note: a small number of empty days is normal (e.g. early 2019).")
+        by_status = failed_df["status"].value_counts().to_dict()
+        print(f"\n  WARNING: {len(problem_days)} problem days -> {FAILED_CSV.name}")
+        for s, n in by_status.items():
+            print(f"    {s}: {n} day(s)")
+        errors  = failed_df[failed_df["status"] == FETCH_ERROR]
+        empties = failed_df[failed_df["status"] == FETCH_EMPTY]
+        if len(errors) + len(empties) > 5:
+            print(f"  Re-run to retry api_error / empty_response days.")
     else:
-        print("  All days fetched successfully (no empty responses).")
+        print("  All days fetched successfully.")
 
     return df
 
@@ -354,6 +393,21 @@ def export_excel(monthly: pd.DataFrame) -> None:
 
         # Notes written below the data table (plain rows, no extra header)
         notes = [
+            ["DATA QUALITY NOTICE — READ BEFORE USING FOR VALUATION"],
+            ["This dataset is suitable for plant-level physical output analysis "
+             "(capacity factors, operational trends, fuel mix). However, two "
+             "discrepancies must be investigated before using figures in a "
+             "valuation model:"],
+            ["[1] Geothermal 2021: our data is 10% BELOW the annual report "
+             "(expected direction: above). Likely cause: Kizildere III used a "
+             "different EPIAS plant ID in early 2021. Do not use 2021 geothermal "
+             "for year-on-year comparisons without further verification."],
+            ["[2] Hydro +16-21% above annual report every year. Gross/net "
+             "explains ~5%; the remaining ~15% is unexplained. Possible causes: "
+             "Yukari Mercan / Haci Mercan sub-units may include output not "
+             "wholly attributed to Zorlu in EPIAS. Verify ownership structure "
+             "before relying on hydro figures in a financial model."],
+            [""],
             ["Expected differences — explained"],
             ["Wind gap (~90-120 GWh/yr)",
              "Pakistan Jhimpir (56.4 MW wind) is in the Annual Report but NOT in EPIAS. "
